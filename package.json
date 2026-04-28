@@ -1,6 +1,6 @@
 {
     "name": "pi-chutes",
-    "version": "1.1.1",
+    "version": "1.1.2",
     "description": "Pi coding agent extension to integrate Chutes.ai as a provider.",
     "keywords": [
         "pi-package",
