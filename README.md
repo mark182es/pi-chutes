@@ -2,6 +2,8 @@
 
 A pi coding agent extension that provides access to models from [Chutes.ai](https://chutes.ai), a platform offering various open and proprietary LLM models via an OpenAI-compatible API.
 
+<video src="https://github.com/user-attachments/assets/14d8cd6d-bec0-49af-b21b-1858548c551a" width="100%" autoplay loop muted playsinline></video>
+
 ## Features
 
 - **Automatic Model Discovery**: Fetches the latest models from Chutes.ai on every startup
