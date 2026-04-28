@@ -1,6 +1,6 @@
 # Pi Chutes Extension
 
-A pi coding agent extension that provides access to models from [Chutes.ai](https://llm.chutes.ai), a platform offering various open and proprietary LLM models via an OpenAI-compatible API.
+A pi coding agent extension that provides access to models from [Chutes.ai](https://chutes.ai), a platform offering various open and proprietary LLM models via an OpenAI-compatible API.
 
 ## Features
 
