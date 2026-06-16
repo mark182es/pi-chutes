@@ -2,6 +2,7 @@ import type {
   ExtensionAPI,
   ProviderModelConfig
 } from "@earendil-works/pi-coding-agent";
+import type { ThemeColor } from "@earendil-works/pi-coding-agent";
 import {
   readFileSync,
   existsSync,
@@ -147,6 +148,157 @@ function validateModels(models: ProviderModelConfig[]): {
   }
 
   return { valid: true };
+}
+
+// =============================================================================
+// Chutes usage API types and fetcher
+// =============================================================================
+
+interface UsageWindow {
+  usage: number;
+  cap: number;
+  remaining: number;
+  reset_at: string;
+}
+
+interface ChutesUsageResponse {
+  subscription: boolean;
+  custom: boolean;
+  monthly_price: number;
+  anchor_date: string;
+  effective_date: string;
+  updated_at: string;
+  four_hour: UsageWindow;
+  monthly: UsageWindow;
+}
+
+/**
+ * Read the Chutes API key from auth.json
+ */
+function getChutesApiKey(): string | null {
+  const auth = loadAuth();
+  const chutesAuth = auth["chutes"] as Record<string, unknown> | undefined;
+  if (chutesAuth && typeof chutesAuth.key === "string") {
+    return chutesAuth.key;
+  }
+  return null;
+}
+
+/**
+ * Fetch subscription usage from Chutes API.
+ * Returns usage data or null on failure.
+ */
+async function fetchUsage(): Promise<ChutesUsageResponse | null> {
+  const apiKey = getChutesApiKey();
+  if (!apiKey) {
+    return null;
+  }
+
+  try {
+    const response = await fetch(
+      "https://api.chutes.ai/users/me/subscription_usage",
+      {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: apiKey
+        }
+      }
+    );
+
+    if (!response.ok) {
+      console.error(
+        `[pi-chutes] Failed to fetch usage: HTTP ${response.status}`
+      );
+      return null;
+    }
+
+    return (await response.json()) as ChutesUsageResponse;
+  } catch (error) {
+    console.error("[pi-chutes] Failed to fetch usage:", error);
+    return null;
+  }
+}
+
+/**
+ * Format usage for the status line.
+ * Color-codes based on usage percentage: green <50%, yellow 50-80%, red >80%.
+ */
+/**
+ * Format remaining time until a reset date as a human-readable string.
+ * Returns e.g. "2h 15m" or "45m" or "just now".
+ */
+function formatTimeRemaining(resetAt: string): string {
+  try {
+    const ms = new Date(resetAt).getTime() - Date.now();
+    if (ms <= 0) return "just now";
+    const totalMin = Math.floor(ms / 60000);
+    const h = Math.floor(totalMin / 60);
+    const m = totalMin % 60;
+    return h > 0 ? `${h}h ${m}m` : `${m}m`;
+  } catch {
+    return "";
+  }
+}
+
+interface UsageStatusParts {
+  monthly: string;
+  fourHour: string;
+  fourHourRemaining: string;
+}
+
+function formatUsageStatus(
+  usage: ChutesUsageResponse,
+  theme: { fg: (color: ThemeColor, text: string) => string }
+): UsageStatusParts {
+  const monthlyPct = (usage.monthly.usage / usage.monthly.cap) * 100;
+  const monthlyColor: ThemeColor = monthlyPct > 80 ? "error" : monthlyPct > 50 ? "warning" : "success";
+  const monthlyUsed = usage.monthly.usage.toFixed(2);
+  const monthlyCap = usage.monthly.cap % 1 === 0 ? usage.monthly.cap.toString() : usage.monthly.cap.toFixed(2);
+
+  const fourHourPct = (usage.four_hour.usage / usage.four_hour.cap) * 100;
+  const fourHourColor: ThemeColor = fourHourPct > 80 ? "error" : fourHourPct > 50 ? "warning" : "success";
+  const fourHourUsed = usage.four_hour.usage.toFixed(2);
+  const fourHourCap = usage.four_hour.cap % 1 === 0 ? usage.four_hour.cap.toString() : usage.four_hour.cap.toFixed(2);
+  const fourHourReset = formatTimeRemaining(usage.four_hour.reset_at);
+
+  // Three separate status entries so pi-statusline renders each in its own slot
+  // Each must fit within ~22 chars (pi-statusline truncation limit)
+  const monthly = theme.fg(monthlyColor, `Chutes mo $${monthlyUsed}/$${monthlyCap}`);
+  const fourHour = theme.fg(fourHourColor, `Chutes 4h $${fourHourUsed}/$${fourHourCap}`);
+  const fourHourRemaining = fourHourReset ? theme.fg(fourHourColor, `4h resets ${fourHourReset}`) : "";
+
+  return { monthly, fourHour, fourHourRemaining };
+}
+
+/**
+ * Format a detailed usage breakdown string.
+ */
+function formatUsageDetail(usage: ChutesUsageResponse): string {
+  const fmtNum = (n: number) =>
+    n % 1 === 0 ? n.toString() : n.toFixed(4);
+  const fmtReset = (iso: string) => {
+    try {
+      return new Date(iso).toLocaleString();
+    } catch {
+      return iso;
+    }
+  };
+
+  const monthlyPct = ((usage.monthly.usage / usage.monthly.cap) * 100).toFixed(1);
+  const fourHourPct = ((usage.four_hour.usage / usage.four_hour.cap) * 100).toFixed(1);
+
+  return [
+    `Chutes Usage — $${usage.monthly_price}/mo plan`,
+    "",
+    `Monthly:  $${fmtNum(usage.monthly.usage)} / $${fmtNum(usage.monthly.cap)} (${monthlyPct}%)`,
+    `  Remaining: $${fmtNum(usage.monthly.remaining)}`,
+    `  Resets: ${fmtReset(usage.monthly.reset_at)}`,
+    "",
+    `4-Hour:   $${fmtNum(usage.four_hour.usage)} / $${fmtNum(usage.four_hour.cap)} (${fourHourPct}%)`,
+    `  Remaining: $${fmtNum(usage.four_hour.remaining)}`,
+    `  Resets: ${fmtReset(usage.four_hour.reset_at)}`
+  ].join("\n");
 }
 
 // Default models (used as fallback if fetch fails or no saved file)
@@ -514,6 +666,9 @@ async function resolveModels(): Promise<ProviderModelConfig[]> {
 // Extension entry point — async factory fetches models on every pi startup
 // =============================================================================
 
+// Refresh interval for usage status (5 minutes)
+const USAGE_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+
 export default async function (pi: ExtensionAPI) {
   // Fetch latest models from Chutes API on startup
   const models = await resolveModels();
@@ -529,5 +684,82 @@ export default async function (pi: ExtensionAPI) {
     apiKey: "CHUTES_API_KEY",
     api: "openai-completions",
     models
+  });
+
+  // ===========================================================================
+  // Usage status line
+  // ===========================================================================
+
+  let usageTimer: ReturnType<typeof setInterval> | null = null;
+  let cachedUsage: ChutesUsageResponse | null = null;
+
+  /**
+   * Fetch usage and update status lines.
+   */
+  async function refreshUsageStatus(ctx: { ui: { theme: { fg: (color: ThemeColor, text: string) => string }; setStatus: (key: string, text: string | undefined) => void } }): Promise<void> {
+    const usage = await fetchUsage();
+    cachedUsage = usage;
+
+    if (!usage) {
+      // Clear status if no API key or fetch failed
+      ctx.ui.setStatus("chutes-mo", undefined);
+      ctx.ui.setStatus("chutes-4h", undefined);
+      ctx.ui.setStatus("chutes-4h-remaining", undefined);
+      return;
+    }
+
+    const parts = formatUsageStatus(usage, ctx.ui.theme);
+    ctx.ui.setStatus("chutes-mo", parts.monthly);
+    ctx.ui.setStatus("chutes-4h", parts.fourHour);
+    ctx.ui.setStatus("chutes-4h-remaining", parts.fourHourRemaining || undefined);
+  }
+
+  pi.on("session_start", async (_event, ctx) => {
+    // Initial fetch
+    await refreshUsageStatus(ctx);
+
+    // Auto-refresh periodically
+    if (usageTimer) clearInterval(usageTimer);
+    usageTimer = setInterval(async () => {
+      await refreshUsageStatus(ctx);
+    }, USAGE_REFRESH_INTERVAL_MS);
+  });
+
+  pi.on("session_shutdown", async () => {
+    if (usageTimer) {
+      clearInterval(usageTimer);
+      usageTimer = null;
+    }
+    cachedUsage = null;
+  });
+
+  // ===========================================================================
+  // /usage command — detailed breakdown
+  // ===========================================================================
+
+  pi.registerCommand("usage", {
+    description: "Show Chutes subscription usage details",
+    handler: async (_args, ctx) => {
+      const usage = await fetchUsage();
+      if (!usage) {
+        ctx.ui.notify(
+          "Could not fetch usage. Make sure your Chutes API key is set via /login.",
+          "error"
+        );
+        return;
+      }
+
+      // Update cache
+      cachedUsage = usage;
+
+      // Update status lines
+      const parts = formatUsageStatus(usage, ctx.ui.theme);
+      ctx.ui.setStatus("chutes-mo", parts.monthly);
+      ctx.ui.setStatus("chutes-4h", parts.fourHour);
+      ctx.ui.setStatus("chutes-4h-remaining", parts.fourHourRemaining || undefined);
+
+      // Show detailed breakdown
+      ctx.ui.notify(formatUsageDetail(usage), "info");
+    }
   });
 }

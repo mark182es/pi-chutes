@@ -26,5 +26,8 @@
         "extensions": [
             "index.ts"
         ]
+    },
+    "dependencies": {
+        "@earendil-works/pi-tui": "^0.79.5"
     }
 }
