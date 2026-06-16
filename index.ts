@@ -390,8 +390,8 @@ function convertModel(chutesModel: ChutesModel): ProviderModelConfig | null {
   const input =
     inputModalities.includes("image") ||
     inputModalities.includes("video")
-      ? (["text", "image"] as const)
-      : (["text"] as const);
+      ? ["text", "image"]
+      : ["text"];
 
   const pricing = chutesModel.pricing || {
     prompt: 0,
