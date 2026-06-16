@@ -387,7 +387,7 @@ function convertModel(chutesModel: ChutesModel): ProviderModelConfig | null {
     : [];
 
   const reasoning = supportedFeatures.includes("reasoning");
-  const input =
+  const input: ("text" | "image")[] =
     inputModalities.includes("image") ||
     inputModalities.includes("video")
       ? ["text", "image"]
