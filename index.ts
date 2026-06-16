@@ -1,7 +1,7 @@
 import type {
   ExtensionAPI,
   Model
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import {
   readFileSync,
   existsSync,
