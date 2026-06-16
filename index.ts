@@ -1,6 +1,6 @@
 import type {
   ExtensionAPI,
-  Model
+  ProviderModelConfig
 } from "@earendil-works/pi-coding-agent";
 import {
   readFileSync,
@@ -63,7 +63,7 @@ function validateApiKey(apiKey: string): {
  * Returns { valid: boolean, error?: string }
  */
 function validateModel(
-  model: Model,
+  model: ProviderModelConfig,
   index: number
 ): { valid: boolean; error?: string } {
   if (!model || typeof model !== "object") {
@@ -94,11 +94,13 @@ function validateModel(
   if (
     typeof model.cost !== "object" ||
     typeof model.cost.input !== "number" ||
-    typeof model.cost.output !== "number"
+    typeof model.cost.output !== "number" ||
+    typeof model.cost.cacheRead !== "number" ||
+    typeof model.cost.cacheWrite !== "number"
   ) {
     return {
       valid: false,
-      error: `Model ${model.id} has invalid cost configuration`
+      error: `Model ${model.id} has invalid cost configuration (requires input, output, cacheRead, cacheWrite)`
     };
   }
 
@@ -125,7 +127,7 @@ function validateModel(
 /**
  * Validate all models in the array
  */
-function validateModels(models: Model[]): {
+function validateModels(models: ProviderModelConfig[]): {
   valid: boolean;
   error?: string;
 } {
@@ -148,13 +150,13 @@ function validateModels(models: Model[]): {
 }
 
 // Default models (used as fallback if fetch fails or no saved file)
-const defaultModels: Model[] = [
+const defaultModels: ProviderModelConfig[] = [
   {
     id: "MiniMaxAI/MiniMax-M2.5-TEE",
     name: "MiniMaxAI/MiniMax-M2.5-TEE",
     reasoning: true,
     input: ["text"],
-    cost: { input: 0.3, output: 1.1, cacheRead: 0.15 },
+    cost: { input: 0.3, output: 1.1, cacheRead: 0.15, cacheWrite: 0 },
     contextWindow: 196608,
     maxTokens: 65536
   }
@@ -264,7 +266,7 @@ function saveApiKey(apiKey: string): void {
 /**
  * Load models from saved JSON file if it exists
  */
-function loadSavedModels(): Model[] | null {
+function loadSavedModels(): ProviderModelConfig[] | null {
   const modelsFile = getModelsFilePath();
   try {
     if (existsSync(modelsFile)) {
@@ -283,7 +285,7 @@ function loadSavedModels(): Model[] | null {
 /**
  * Save models to JSON file with rollback mechanism on failure
  */
-function saveModels(models: Model[]): void {
+function saveModels(models: ProviderModelConfig[]): void {
   const validation = validateModels(models);
   if (!validation.valid) {
     throw new Error(`Model validation failed: ${validation.error}`);
@@ -362,10 +364,10 @@ interface ChutesResponse {
 }
 
 /**
- * Convert chutes API model to pi Model format
+ * Convert chutes API model to pi ProviderModelConfig format
  * Returns null if model cannot be converted (invalid data)
  */
-function convertModel(chutesModel: ChutesModel): Model | null {
+function convertModel(chutesModel: ChutesModel): ProviderModelConfig | null {
   if (
     !chutesModel ||
     typeof chutesModel.id !== "string" ||
@@ -411,7 +413,8 @@ function convertModel(chutesModel: ChutesModel): Model | null {
       cacheRead:
         typeof pricing.input_cache_read === "number"
           ? pricing.input_cache_read
-          : 0
+          : 0,
+      cacheWrite: 0
     },
     contextWindow:
       typeof chutesModel.context_length === "number"
@@ -432,7 +435,7 @@ function convertModel(chutesModel: ChutesModel): Model | null {
  * Fetch models from the Chutes API.
  * Returns converted and validated models, or null on failure.
  */
-async function fetchModels(): Promise<Model[] | null> {
+async function fetchModels(): Promise<ProviderModelConfig[] | null> {
   try {
     const response = await fetch("https://llm.chutes.ai/v1/models", {
       method: "GET",
@@ -452,7 +455,7 @@ async function fetchModels(): Promise<Model[] | null> {
 
     const convertedModels = data.data
       .map(convertModel)
-      .filter((m): m is Model => m !== null);
+      .filter((m): m is ProviderModelConfig => m !== null);
 
     if (convertedModels.length === 0) {
       console.warn(
@@ -479,7 +482,7 @@ async function fetchModels(): Promise<Model[] | null> {
 /**
  * Resolve models to use: try API fetch, fall back to saved file, then defaults.
  */
-async function resolveModels(): Promise<Model[]> {
+async function resolveModels(): Promise<ProviderModelConfig[]> {
   // 1. Try to fetch from API
   const fetched = await fetchModels();
   if (fetched) {
