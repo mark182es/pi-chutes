@@ -14,6 +14,92 @@ import {
 } from "node:fs";
 import { join, dirname } from "node:path";
 
+// =============================================================================
+// Enhanced Error Logging System with Throttling
+// =============================================================================
+
+interface ErrorTracker {
+  count: number;
+  lastLoggedTime: number;
+  lastMessage: string;
+}
+
+const errorTrackers = new Map<string, ErrorTracker>();
+const THROTTLE_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
+const THROTTLE_COUNT = 5; // Log every 5th error
+
+/**
+ * Log an error with throttling to avoid spamming the console
+ * @param category - Error category for tracking
+ * @param message - Error message
+ * @param error - Optional error object
+ */
+function logError(category: string, message: string, error?: unknown): void {
+  const now = Date.now();
+  let tracker = errorTrackers.get(category);
+  
+  if (!tracker) {
+    tracker = { count: 0, lastLoggedTime: 0, lastMessage: message };
+    errorTrackers.set(category, tracker);
+  }
+  
+  tracker.count++;
+  
+  const shouldLog = 
+    tracker.count % THROTTLE_COUNT === 0 ||
+    now - tracker.lastLoggedTime >= THROTTLE_INTERVAL_MS;
+  
+  if (shouldLog) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    const fullMessage = error ? `${message}: ${errorMsg}` : message;
+    
+    console.error(`[pi-chutes] ERROR [${category}]: ${fullMessage}`);
+    
+    tracker.lastLoggedTime = now;
+    tracker.lastMessage = message;
+    
+    // Reset count after logging
+    tracker.count = 0;
+  }
+}
+
+/**
+ * Log a warning message
+ * @param message - Warning message
+ * @param data - Optional data
+ */
+function logWarning(message: string, data?: unknown): void {
+  console.warn(`[pi-chutes] WARNING: ${message}`, data || '');
+}
+
+/**
+ * Log informational message
+ * @param message - Info message
+ * @param data - Optional data
+ */
+function logInfo(message: string, data?: unknown): void {
+  console.log(`[pi-chutes] INFO: ${message}`, data || '');
+}
+
+/**
+ * Log debug message (only in debug mode)
+ * @param message - Debug message
+ * @param data - Optional data
+ */
+function logDebug(message: string, data?: unknown): void {
+  if (process.env.DEBUG === 'true') {
+    console.debug(`[pi-chutes] DEBUG: ${message}`, data || '');
+  }
+}
+
+/**
+ * Reset error tracker for a category (call after successful operations)
+ * @param category - Error category
+ */
+function resetErrorTracker(category: string): void {
+  errorTrackers.delete(category);
+}
+
 // Security: Minimum and maximum API key lengths
 const MIN_API_KEY_LENGTH = 16;
 const MAX_API_KEY_LENGTH = 512;
@@ -185,12 +271,38 @@ function getChutesApiKey(): string | null {
 }
 
 /**
+ * Check if we have a valid API key configured
+ */
+function hasValidApiKey(): boolean {
+  const apiKey = getChutesApiKey();
+  if (!apiKey) return false;
+  
+  const validation = validateApiKey(apiKey);
+  return validation.valid;
+}
+
+/**
+ * Configuration to disable API calls (env var or flag)
+ */
+function shouldSkipApiCalls(): boolean {
+  return process.env.PI_CHUTES_DISABLE_API === 'true' || 
+         process.env.PI_CHUTES_DISABLE_API === '1';
+}
+
+/**
  * Fetch subscription usage from Chutes API.
  * Returns usage data or null on failure.
  */
 async function fetchUsage(): Promise<ChutesUsageResponse | null> {
+  // Skip if API calls are disabled
+  if (shouldSkipApiCalls()) {
+    logInfo("API calls disabled by configuration, skipping usage fetch");
+    return null;
+  }
+
   const apiKey = getChutesApiKey();
   if (!apiKey) {
+    logDebug("No API key available for usage fetch");
     return null;
   }
 
@@ -207,23 +319,19 @@ async function fetchUsage(): Promise<ChutesUsageResponse | null> {
     );
 
     if (!response.ok) {
-      console.error(
-        `[pi-chutes] Failed to fetch usage: HTTP ${response.status}`
-      );
+      logError("usage-fetch", `Failed to fetch usage: HTTP ${response.status}`);
       return null;
     }
 
-    return (await response.json()) as ChutesUsageResponse;
+    const usageData = await response.json() as ChutesUsageResponse;
+    resetErrorTracker("usage-fetch");
+    return usageData;
   } catch (error) {
-    console.error("[pi-chutes] Failed to fetch usage:", error);
+    logError("usage-fetch", "Failed to fetch usage", error);
     return null;
   }
 }
 
-/**
- * Format usage for the status line.
- * Color-codes based on usage percentage: green <50%, yellow 50-80%, red >80%.
- */
 /**
  * Format remaining time until a reset date as a human-readable string.
  * Returns e.g. "2h 15m" or "45m" or "just now".
@@ -348,7 +456,7 @@ function loadAuth(): Record<string, unknown> {
       return JSON.parse(data);
     }
   } catch (error) {
-    console.error("[pi-chutes] Failed to load auth.json:", error);
+    logError("auth-load", "Failed to load auth.json", error);
   }
   return {};
 }
@@ -386,16 +494,13 @@ function saveApiKey(apiKey: string): void {
     chmodSync(tempFile, 0o600);
     renameSync(tempFile, authFile);
 
-    console.log("[pi-chutes] API key saved successfully");
+    logInfo("API key saved successfully");
   } catch (error) {
     if (existsSync(tempFile)) {
       try {
         unlinkSync(tempFile);
       } catch (cleanupError) {
-        console.error(
-          "[pi-chutes] Failed to cleanup temp file:",
-          cleanupError
-        );
+        logError("api-key-save", "Failed to cleanup temp file", cleanupError);
       }
     }
 
@@ -403,14 +508,11 @@ function saveApiKey(apiKey: string): void {
       try {
         writeFileSync(authFile, existingAuthBackup);
       } catch (rollbackError) {
-        console.error(
-          "[pi-chutes] Failed to rollback auth.json:",
-          rollbackError
-        );
+        logError("api-key-save", "Failed to rollback auth.json", rollbackError);
       }
     }
 
-    console.error("[pi-chutes] Failed to save API key:", error);
+    logError("api-key-save", "Failed to save API key", error);
     throw error;
   }
 }
@@ -429,7 +531,7 @@ function loadSavedModels(): ProviderModelConfig[] | null {
       }
     }
   } catch (error) {
-    console.error("[pi-chutes] Failed to load saved models:", error);
+    logError("models-load", "Failed to load saved models", error);
   }
   return null;
 }
@@ -468,15 +570,13 @@ function saveModels(models: ProviderModelConfig[]): void {
     );
 
     renameSync(tempFile, modelsFile);
+    resetErrorTracker("models-save");
   } catch (error) {
     if (existsSync(tempFile)) {
       try {
         unlinkSync(tempFile);
       } catch (cleanupError) {
-        console.error(
-          "[pi-chutes] Failed to cleanup temp file:",
-          cleanupError
-        );
+        logError("models-save", "Failed to cleanup temp file", cleanupError);
       }
     }
 
@@ -484,14 +584,11 @@ function saveModels(models: ProviderModelConfig[]): void {
       try {
         writeFileSync(modelsFile, existingModelsBackup);
       } catch (rollbackError) {
-        console.error(
-          "[pi-chutes] Failed to rollback models.json:",
-          rollbackError
-        );
+        logError("models-save", "Failed to rollback models.json", rollbackError);
       }
     }
 
-    console.error("[pi-chutes] Failed to save models:", error);
+    logError("models-save", "Failed to save models", error);
     throw error;
   }
 }
@@ -588,6 +685,12 @@ function convertModel(chutesModel: ChutesModel): ProviderModelConfig | null {
  * Returns converted and validated models, or null on failure.
  */
 async function fetchModels(): Promise<ProviderModelConfig[] | null> {
+  // Skip if API calls are disabled via configuration
+  if (shouldSkipApiCalls()) {
+    logInfo("API calls disabled by configuration, skipping fetch");
+    return null;
+  }
+
   try {
     const response = await fetch("https://llm.chutes.ai/v1/models", {
       method: "GET",
@@ -597,9 +700,7 @@ async function fetchModels(): Promise<ProviderModelConfig[] | null> {
     });
 
     if (!response.ok) {
-      console.error(
-        `[pi-chutes] Failed to fetch models: HTTP ${response.status}`
-      );
+      logError("models-fetch", `Failed to fetch models: HTTP ${response.status}`);
       return null;
     }
 
@@ -610,60 +711,97 @@ async function fetchModels(): Promise<ProviderModelConfig[] | null> {
       .filter((m): m is ProviderModelConfig => m !== null);
 
     if (convertedModels.length === 0) {
-      console.warn(
-        "[pi-chutes] No valid models found in API response"
-      );
+      logWarning("No valid models found in API response");
       return null;
     }
 
     const validation = validateModels(convertedModels);
     if (!validation.valid) {
-      console.warn(
-        `[pi-chutes] Model validation failed: ${validation.error}`
-      );
+      logWarning(`Model validation failed: ${validation.error}`);
       return null;
     }
 
+    resetErrorTracker("models-fetch");
     return convertedModels;
   } catch (error) {
-    console.error("[pi-chutes] Failed to fetch models:", error);
+    logError("models-fetch", "Failed to fetch models", error);
     return null;
   }
 }
 
 /**
- * Resolve models to use: try API fetch, fall back to saved file, then defaults.
+ * Refresh models from API in background (non-blocking)
+ * Updates cache if successful
  */
-async function resolveModels(): Promise<ProviderModelConfig[]> {
-  // 1. Try to fetch from API
-  const fetched = await fetchModels();
-  if (fetched) {
-    try {
-      saveModels(fetched);
-    } catch {
-      // Non-critical — models are still registered in memory
-    }
-    return fetched;
+async function refreshModelsInBackground(): Promise<void> {
+  // Skip if no API key or API calls disabled
+  if (!hasValidApiKey() || shouldSkipApiCalls()) {
+    logDebug("Skipping background refresh - no API key or API calls disabled");
+    return;
   }
 
-  // 2. Try saved models from previous fetch
+  try {
+    logDebug("Background refresh of models started...");
+    const fetched = await fetchModels();
+    if (fetched) {
+      saveModels(fetched);
+      logInfo("Background models refresh completed successfully");
+    }
+  } catch (error) {
+    // Silently fail in background - non-critical operation
+    logDebug("Background models refresh failed", error);
+  }
+}
+
+/**
+ * Resolve models to use: cache-first approach with background refresh.
+ * 1. Check saved/cached models first for immediate startup
+ * 2. If no API key or API calls disabled, use cache or defaults only
+ * 3. If API key exists, start background refresh to update cache
+ */
+async function resolveModels(): Promise<ProviderModelConfig[]> {
+  // 1. Try saved models from previous fetch (cache-first)
   const saved = loadSavedModels();
   if (saved) {
     const validation = validateModels(saved);
     if (validation.valid) {
+      // Start background refresh if we have API key
+      if (hasValidApiKey()) {
+        // Don't await - non-blocking background refresh
+        refreshModelsInBackground().catch(() => {
+          // Silently fail - already logged in refreshModelsInBackground
+        });
+      }
+      logInfo("Using cached models");
       return saved;
     }
-    console.warn(
-      `[pi-chutes] Saved models invalid: ${validation.error}. Using defaults.`
-    );
+    logWarning(`Saved models invalid: ${validation.error}.`);
+  }
+
+  // 2. If we have API key, try to fetch models (synchronous - blocking)
+  if (hasValidApiKey()) {
+    logInfo("Fetching models from API...");
+    const fetched = await fetchModels();
+    if (fetched) {
+      try {
+        saveModels(fetched);
+        logInfo("Models fetched and saved successfully");
+      } catch (error) {
+        logError("models-save", "Failed to save fetched models (non-critical)", error);
+      }
+      return fetched;
+    }
+  } else {
+    logInfo("No valid API key found, skipping API fetch");
   }
 
   // 3. Fall back to defaults
+  logInfo("Using default models");
   return defaultModels;
 }
 
 // =============================================================================
-// Extension entry point — async factory fetches models on every pi startup
+// Extension entry point — cache-first with optional background refresh
 // =============================================================================
 
 // Refresh interval for usage status (5 minutes)
@@ -697,11 +835,19 @@ export default async function (pi: ExtensionAPI) {
    * Fetch usage and update status lines.
    */
   async function refreshUsageStatus(ctx: { ui: { theme: { fg: (color: ThemeColor, text: string) => string }; setStatus: (key: string, text: string | undefined) => void } }): Promise<void> {
+    // Skip if no API key or API calls disabled
+    if (!hasValidApiKey() || shouldSkipApiCalls()) {
+      ctx.ui.setStatus("chutes-mo", undefined);
+      ctx.ui.setStatus("chutes-4h", undefined);
+      ctx.ui.setStatus("chutes-4h-remaining", undefined);
+      return;
+    }
+
     const usage = await fetchUsage();
     cachedUsage = usage;
 
     if (!usage) {
-      // Clear status if no API key or fetch failed
+      // Clear status if fetch failed
       ctx.ui.setStatus("chutes-mo", undefined);
       ctx.ui.setStatus("chutes-4h", undefined);
       ctx.ui.setStatus("chutes-4h-remaining", undefined);
